@@ -1,0 +1,161 @@
+#!/bin/sh
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+
+print_help()
+{
+        echo "Použitie: tradelog [-h|--help] [FILTR] [PŘÍKAZ] [LOG [LOG2 [...]]"
+        echo "   PŘÍKAZ může být jeden z:"
+        echo "           list-tick – výpis seznamu vyskytujících se burzovních symbolů, tzv. “tickerů”."
+        echo "           profit – výpis celkového zisku z uzavřených pozic."
+        echo "           pos – výpis hodnot aktuálně držených pozic seřazených sestupně dle hodnoty."
+        echo "           last-price – výpis poslední známé ceny pro každý ticker."
+        echo "           hist-ord – výpis histogramu počtu transakcí dle tickeru."
+        echo "           graph-pos – výpis grafu hodnot držených pozic dle tickeru."
+        echo "   FILTR může být kombinace následujících:"
+        echo "           -a DATETIME – after: jsou uvažovány pouze záznamy PO tomto datu (bez tohoto data). DATETIME je formátu YYYY-MM-DD HH:MM:SS."
+        echo "           -b DATETIME – before: jsou uvažovány pouze záznamy PŘED tímto datem (bez tohoto data)."
+        echo "           -t TICKER – jsou uvažovány pouze záznamy odpovídající danému tickeru. Při více výskytech přepínače se bere množina všech uvedených tickerů."
+        echo "           -w WIDTH – u výpisu grafů nastavuje jejich šířku, tedy délku nejdelšího řádku na WIDTH. Tedy, WIDTH musí být kladné celé číslo. Více výskytů přepínače je chybné spuštění."
+        echo "           -h a --help vypíšou nápovědu s krátkým popisem každého příkazu a přepínače."
+}
+
+cas_po="0000-00-00 00:00:00"
+cas_pred="9999-99-99 99:99:99"
+WIDTH="nn"
+
+#/////////////////////////////////////Načítanie vstupu/////////////////////////////////////////#
+
+# rozdelenie na prikazy,jednotlive filtre, spustienie pomoci, zisaknie logov
+while [ "$#" -gt 0 ]; do
+        case "$1" in
+        list-tick|profit|pos|last-price|hist-ord|graph-pos)
+                prikaz="$1"
+                shift
+                ;;
+        -a)
+                cas_po="$2 $3"
+                shift ; shift ; shift
+                ;;
+        -b)
+                cas_pred="$2 $3"
+                shift ; shift ; shift
+                ;;
+        -t)
+                filtre="$filtre $1"
+                tickery="$tickery $2"
+                shift ; shift
+                ;;
+        -w)
+                if [ $2 -lt 0 ] ; then
+                echo "-w nesmie byť záporné číslo" 1>&2
+                exit 1
+                fi
+                if [ $WIDTH != "nn" ] ; then
+                echo "nadmerný výskyt prepínača -w" 1>&2
+                exit 1
+                fi
+                WIDTH="$2"
+		shift ; shift
+                ;;
+        -h|--help)
+                print_help
+                exit 0
+                ;;
+        *.log)
+                files="$1 $files"
+                shift
+                ;;
+        *.log.gz)
+                gz_files="$1 $gz_files"
+                shift
+                ;;
+        esac
+done
+#predanie obsahu suboru
+if [ "$gz_files" != "" ] && [ "$files" = "" ] ; then
+        obsah=`gzip -dc $gz_files`
+fi
+if [ "$files" != "" ] && [ "$gz_files" = "" ] ; then
+          obsah=`cat $files`
+fi
+if [ "$files" != "" ] && [ "$gz_files" != "" ] ; then
+        obsah11=`cat $files`"\n"
+        obsah22=`gzip -dc $gz_files`
+        obsah="$obsah11 \n $obsah22"
+fi
+
+
+#////////////////////////////////////Filtrácia////////////////////////////////////////////#
+
+obsah=`echo "$obsah" | awk -F ';' -v var="$cas_po" '$1 > var {print \$0}'`              #-a
+obsah=`echo "$obsah" | awk -F ';' -v var="$cas_pred" '$1 < var {print \$0}'`            #-b
+for i in $tickery ; do
+        obsah5=`echo "$obsah" | awk -F ';' -v var="$i" '$2 == var {print \$0}'`         #-t
+        obsah6="$obsah6 \n$obsah5"
+        done
+obsah6=`echo "$obsah6" | awk -F ';' '{if($2 != "") print \$0}'`
+if [ "$obsah6" != "" ] ; then
+        obsah="$obsah6"
+fi
+
+#/////////////////////////////////////Príkazy/////////////////////////////////////////////#
+
+case "$prikaz" in
+        list-tick)              #vytlaci druhy stlpec ktory zoradi a vyselectuje opakujuce sa tickery
+                obsah=`echo "$obsah" | awk -F';' '{print $2}'|sort |uniq`
+                ;;
+        profit)                 #v pripade ze v 3 stlpci sa nachadza "sell" k "vysledku" sa pripocita kladny nasobok v opacnom pripade zaporny vysledok sa nasledne ulozi do premennej "obsah"
+                obsah=`echo "$obsah" | awk -F';' '{if($3 == "sell" ){vysledok+=$4*$6}else{vysledok+=-1*$4*$6}} END{printf "%.2f", vysledok}'`
+                ;;
+        pos)
+                obsah1=`echo "$obsah" | awk -F';' '{if($3 == "buy"){print $2":"$6":"$4}else{print $2":"$6*-1":"$4}}'|sort`      #roztriedenie objemu na + a -
+                obsah2=`echo "$obsah1" | awk -F':' -v var=" " -v val=" " '{if(var == $1 ){val+=$2}else if(var==" "){var=$1; val=$2}else{print var":"val; var=$1; val=$2}} END{print var":"val}'`        #scitanie objemov
+                obsah3=`echo "$obsah" | awk -F';' '{print $2" : "$4}'|sort -s -t: -k1,1 |tac|uniq -w 5| tac`            #last-price
+                j="a"
+                for i in $obsah3 ; do
+                        obsah2=`echo "$obsah2" | awk -F':' -v var=$p -v val=$i '{if($1 == var){print $1":"$2":"val}else{print  $1":"$2":"$3}}'` #pridanie last-price k objemom
+                        p=$j
+                        j="$i"
+                done
+                obsah=`echo "$obsah2" | awk -F':' '{if($1 != "" && $1 != "0"){ printf "%-10s",$1 ;printf ": ";printf "%11.2f", $2*$3 ; printf "\n"}}'|sort -r -n -t: -k2,2`     #vynasoebenie objemov last-price
+                ;;
+        last-price)
+                obsah=`echo "$obsah" | awk -F';' '{print $2"                    :"$4}'|sort -s -t: -k1,1 |tac|uniq -w 15| tac`
+                obsah=`echo "$obsah" | awk -F'                    :' '{if($1 != "")printf "%-10s",$1;printf ": ";printf "%7.2f",$2;printf "\n"}'`
+                ;;
+        hist-ord)
+                obsah=`echo "$obsah" | awk -F';' '{print $2}'|sort`             #vyselektovanie druheho stlpca a jeho zoradenie
+                obsah=`echo "$obsah" | awk -v var="" -v len=1 '{if($1 == var){len++}else{print var":"len;var=$1;len=1}}END{print var":"len}'|sort -r -n -t: -k2,2`          #scitanie poctu tickerov
+                if [ $WIDTH != "nn" ] ; then
+                max=`echo "$obsah" | awk -F':' -v var=0 '{if(var==0)print $2;var=1}'`    # -w prepisanie najvedsej hondoty na WIDTH hodnotu
+                obsah=`echo "$obsah" | awk -F':' -v var=$max -v val=$WIDTH '{print $1":"$2*val/var}'|sort`
+                fi
+                obsah=`echo "$obsah" | awk -F':' '{print $1":"$2}'|sort`
+                obsah=`echo "$obsah" | awk -F':' '{if($1 != "")printf $1"	: ";if($1 != "")for (i = 0; i != $2; i++) printf "#"; if($1 != "")printf "\n"}'` #vypisovanie #
+                ;;
+        graph-pos)
+                obsah1=`echo "$obsah" | awk -F';' '{if($3 == "buy"){print $2":"$6":"$4}else{print $2":"$6*-1":"$4}}'|sort`      #roztriedenie objemu na + a -
+                obsah2=`echo "$obsah1" | awk -F':' -v var=" " -v val=" " '{if(var == $1 ){val+=$2}else if(var==" "){var=$1; val=$2}else{print var":"val; var=$1; val=$2}} END{print var":"val}'`        #scitanie objemov
+                obsah3=`echo "$obsah" | awk -F';' '{print $2" : "$4}'|sort -s -t: -k1,1 |tac|uniq -w 5| tac`
+                j="a"
+                for i in $obsah3 ; do
+                        obsah2=`echo "$obsah2" | awk -F':' -v var=$p -v val=$i '{if($1 == var){print $1":"$2":"val}else{print  $1":"$2":"$3}}'` #pridanie last-price k objemom
+                        p=$j
+                        j="$i"
+                done
+                obsah3=`echo "$obsah2" | awk -F':' '{if($1 != "") print  $1":" $2*$3}'|sort`     #vynasoebenie objemov last-price
+
+                if [ "$WIDTH" != "nn" ] ; then
+                obsah2=`echo "$obsah2" | awk -F':' '{if($1 != ""){if($2 > 0){printf "%.2f",$2*$3 ;printf "\n" }else{printf "%.2f",$2*$3*-1 ;printf "\n"}}}'|sort|tac`   #triedenie najvedsej hondoty tak aby bola navrchu
+                max=`echo "$obsah2" | awk -v var=0 '{if(var == 0) print $1; var=1}'`    #zisaknie najvedsej hodnoty
+                obsah=`echo "$obsah3" | awk -F':' -v var=$WIDTH -v val=$max '{if($1 != "")printf $1"	: ";if($1 != "" && $2*var/val >= 1){for (i = 0; i+0.999999999999999999 <$2*var/val; i++) printf "#"; if($1!= "")printf "\n"}else if($1!= ""){for (i = 0; i+0.9999999999999999999999999999 < $2*var/val*-1; i++) printf "!"; if($1 != "")printf "\n"}}'` #vypisanie # alebo ! podla toho ci dana hondota je v + alebo -
+                else
+                obsah=`echo "$obsah3" | awk -F':' '{if($1 != "")printf $1"	: ";if($1 != "" &&  $2/1000 >= 1){for (i = 0; i+0.999999999999999999 <$2/1000; i++) printf "#"; if($1 != "")printf "\n"}else if($1!= ""){for (i = 0; i+0.999999999999999999999 < $2/1000*-1; i++) printf "!"; if($1 != "")printf "\n"}}'` #vypisanie # alebo ! podla toho ci dana hondota je v + alebo -
+                fi
+                ;;
+        esac
+
+#///////////////////////////////////Výpis výstupu/////////////////////////////////////////#
+
+echo "$obsah"
